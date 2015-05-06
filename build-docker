@@ -1,0 +1,77 @@
+#!/bin/bash -e
+
+if [ $# -ne 1 ]
+then
+  echo "Usage: $0 <prod-path>"
+  exit
+fi
+
+if [ ! -e data ]
+then
+  echo "Please run `dirname $0`/control/setup"
+  exit
+fi
+
+if [ `ls deb/* | wc -l` -ne 1 ]
+then
+  echo "Please ensure there is one (and only one) ins-package in deb/ directory"
+  exit
+fi
+
+pushd deb
+package=`ls * | sed 's/.deb$//'`
+popd
+
+set +e
+docker inspect instart:$package >&/dev/null
+if [ $? -ne 0 ]
+then
+  echo "Building image instart:$package"
+  docker build -t instart:$package .
+fi
+set -e
+
+branch=$( docker run -t instart:$package \
+  awk '/Client Branch Name: / {print $NF}' /opt/ins-accel/buildinfo | \
+  tr -d '\r' )
+
+echo "Starting instance $package"
+cid=$( docker run -d instart:$package )
+
+ipaddress=$( docker inspect $cid  | grep IPAddress | sed 's/.*: "//;s/",//' )
+
+for i in 1 2 3 4 5
+do
+  set +e
+  scp -i data/docker \
+    root@$ipaddress:/opt/ins-accel/bin/SenseiSchemaTransformerExec \
+    /tmp/SenseiSchemaTransformerExec.$$
+  if [ $? -eq 0 ]
+  then
+    set -e
+    break
+  fi
+  echo "Server not ready, sleeping"
+  sleep 2
+done
+
+echo "Deploying configuration for $branch"
+python -m qa.tools.instart_remote_controller \
+  --ssh_key data/docker \
+  --schema_transformer_path=/tmp/SenseiSchemaTransformerExec.$$ \
+  --setup_geoip_db=False \
+  --enable_binary_alog=True \
+  --H root@$ipaddress \
+  update_conf $1 $branch
+
+pushd $1
+prod_ver=`git log --pretty=%h HEAD~1..HEAD`
+popd
+
+docker commit \
+  -m "Updated config from: $prod_ver" \
+  $cid \
+  instart:$package.$prod_ver
+docker stop $cid
+rm /tmp/SenseiSchemaTransformerExec.$$
+echo "Created a docker image: instart:$package.$prod_ver"

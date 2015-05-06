@@ -1,0 +1,5 @@
+#!/bin/bash
+for i in /opt/ins-accel/etc/init/*.def
+do
+  mv ${i} ${i%%.def}
+done
